@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QCT - Dosya Gönder</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    
+    <style>
+        /* Modern, sade ve mobil uyumlu CSS mimarisi */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: #f4f4f9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            background: #ffffff;
+            padding: 40px 30px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            text-align: center;
+            width: 90%;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 30px;
+            color: #111;
+        }
+
+        /* İşletim sisteminin galerisini tetikleyecek gizli input */
+        #file-input {
+            display: none;
+        }
+
+        /* Kullanıcının göreceği şık buton */
+        .btn {
+            background-color: #007aff; /* iOS mavi tonu */
+            color: white;
+            padding: 16px 32px;
+            font-size: 18px;
+            font-weight: 600;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.1s ease;
+            display: inline-block;
+            width: 100%;
+            box-shadow: 0 4px 15px rgba(0, 122, 255, 0.3);
+        }
+
+        .btn:active {
+            transform: scale(0.96);
+            background-color: #005bb5;
+        }
+
+        #qr-container {
+            display: none; /* Başlangıçta gizli */
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        #qrcode {
+            padding: 15px;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .instruction {
+            margin-top: 20px;
+            font-size: 15px;
+            color: #666;
+            line-height: 1.5;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1 id="status-text">Dosya Paylaş</h1>
+        
+        <input type="file" id="file-input" accept="image/*, video/*">
+        <label for="file-input" class="btn" id="select-btn">Galeriden Seç</label>
+
+        <div id="qr-container">
+            <div id="qrcode"></div>
+            <p class="instruction">Alıcı cihazın kamerasıyla<br>bu QR kodu okutun.</p>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const selectBtn = document.getElementById('select-btn');
+        const qrContainer = document.getElementById('qr-container');
+        const statusText = document.getElementById('status-text');
+
+        fileInput.addEventListener('change', function(e) {
+            // Kullanıcı bir dosya seçtiyse işlemleri başlat
+            if (e.target.files.length > 0) {
+                const selectedFile = e.target.files[0];
+                
+                // 1. Rastgele benzersiz bir UUID üret
+                const uuid = crypto.randomUUID();
+                
+                // 2. Bağlantı URL'sini dinamik oluştur
+                // window.location.host sayesinde canlıda domaini, testte localhost'u otomatik alır.
+                const protocol = window.location.protocol;
+                const host = window.location.host;
+                const receiveUrl = `${protocol}//${host}/al/${uuid}`;
+
+                // 3. Arayüzü QR kod gösterimine göre güncelle
+                selectBtn.style.display = 'none'; // Butonu gizle
+                statusText.innerText = 'Bağlantı Bekleniyor...';
+                qrContainer.style.display = 'flex'; // QR kod alanını göster
+
+                // 4. QR Kodu Ekrana Bas
+                new QRCode(document.getElementById("qrcode"), {
+                    text: receiveUrl,
+                    width: 220,
+                    height: 220,
+                    colorDark : "#000000",
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.H
+                });
+
+                // Mühendislik Notu: Dosya şimdilik tarayıcı RAM'inde bekliyor.
+                // Faz 4'te WebRTC bağlandığında bu değişkenleri kullanarak veriyi karşıya akıtacağız.
+                window.fileToTransfer = selectedFile;
+                window.roomUUID = uuid;
+                // WebSocket Bağlantısını Kur
+                const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+                const signalingSocket = new WebSocket(`${wsProtocol}${window.location.host}/ws/room/${window.roomUUID}/`);
+
+                signalingSocket.onopen = () => {
+                    console.log("Sinyalleşme sunucusuna bağlanıldı. Alıcı bekleniyor...");
+                };
+
+                signalingSocket.onmessage = async (e) => {
+                    const message = JSON.parse(e.data);
+
+                    // 1. Alıcı odaya girdiğinde "ready" mesajı atacak, biz de WebRTC'yi başlatacağız.
+                    if (message.type === 'ready') {
+                        console.log("Alıcı bağlandı, WebRTC bağlantısı başlatılıyor...");
+                        
+                        peerConnection = new RTCPeerConnection(rtcConfig);
+
+                        // ICE Adaylarını yakala ve alıcıya gönder
+                        peerConnection.onicecandidate = event => {
+                            if (event.candidate) {
+                                signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
+                            }
+                        };
+
+                        // Dosya aktarımı için Data Channel'ı YARAT
+                        dataChannel = peerConnection.createDataChannel('fileTransfer', { ordered: true });
+                        
+                        dataChannel.onopen = () => {
+                            console.log("Veri kanalı açıldı! Dosya gönderimi başlıyor...");
+                            statusText.innerText = "Bağlantı Kuruldu. Dosya Gönderiliyor...";
+                            
+                            const file = window.fileToTransfer;
+                            if (!file) {
+                                console.error("Gönderilecek dosya bulunamadı!");
+                                return;
+                            }
+
+                            // 1. Önce Alıcıya 'Ne gönderdiğimizi' (Metadata) haber verelim
+                            const metadata = {
+                                type: 'metadata',
+                                fileName: file.name,
+                                fileSize: file.size,
+                                fileType: file.type
+                            };
+                            dataChannel.send(JSON.stringify(metadata));
+
+                            // 2. Parçalama (Chunking) Ayarları
+                            const CHUNK_SIZE = 64 * 1024; // 64 KB'lık güvenli paket boyutu
+                            let offset = 0;
+                            const reader = new FileReader();
+
+                            // 4. Her bir parça okunduğunda tetiklenen olay
+                            reader.onload = function(e) {
+                                // Okunan 64 KB'lık parçayı (ArrayBuffer) kanaldan fırlat
+                                dataChannel.send(e.target.result);
+                                offset += CHUNK_SIZE;
+
+                                // Dosyanın tamamı bitmediyse, sıradaki parçayı okumaya devam et
+                                if (offset < file.size) {
+                                    // Buffer'ın şişmesini engellemek için küçük bir gecikme ekleyebiliriz ama 
+                                    // yerel ağda 64KB için tarayıcılar genelde bu hızı tolere eder.
+                                    readSlice(); 
+                                } else {
+                                    // 5. Dosya tamamen bittiğinde Alıcıya 'EOF' (End of File) sinyali gönder
+                                    console.log("Dosya aktarımı tamamlandı. EOF sinyali gönderildi.");
+                                    dataChannel.send(JSON.stringify({ type: 'EOF' }));
+                                    
+                                    // Arayüzü güncelle
+                                    statusText.innerText = "Gönderim Başarılı! ✅";
+                                    statusText.style.color = "#34c759";
+                                }
+                            };
+
+                            // 3. Dosyayı dilimleme (Slice) ve okuma fonksiyonu
+                            const readSlice = () => {
+                                const slice = file.slice(offset, offset + CHUNK_SIZE);
+                                reader.readAsArrayBuffer(slice);
+                            };
+
+                            // Motoru çalıştır: İlk parçayı oku
+                            readSlice();
+                        };
+
+                        // SDP Offer oluştur ve alıcıya gönder
+                        const offer = await peerConnection.createOffer();
+                        await peerConnection.setLocalDescription(offer);
+                        signalingSocket.send(JSON.stringify({ 'offer': offer }));
+                    }
+
+                    // 2. Alıcıdan gelen Answer'ı kabul et
+                    if (message.answer) {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                    }
+
+                    // 3. Alıcıdan gelen ICE adaylarını (Ağ koordinatları) ekle
+                    if (message.candidate) {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    }
+                };
+                
+                console.log("Oluşturulan URL:", receiveUrl);
+            }
+        });
+        // WebRTC Yapılandırması (Google STUN Sunucuları)
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        let peerConnection;
+        let dataChannel;
+    </script>
+
+</body>
+</html>

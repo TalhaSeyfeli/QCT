@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QCT - Receive File</title>
+    
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: #f4f4f9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            background: #ffffff;
+            padding: 40px 30px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            text-align: center;
+            width: 90%;
+            max-width: 400px;
+        }
+
+        #status-text {
+            font-size: 22px;
+            margin-bottom: 20px;
+            color: #111;
+            font-weight: 600;
+        }
+
+        /* İndirme Çubuğu (Progress Bar) Tasarımı */
+        #progress-container {
+            display: none; /* Başlangıçta gizli, transfer başlayınca açılacak */
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 20px;
+            height: 20px;
+        }
+
+        #progress-bar {
+            width: 0%;
+            height: 100%;
+            background-color: #34c759; /* iOS Yeşil tonu */
+            transition: width 0.3s ease;
+        }
+
+        #progress-percentage {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1 id="status-text">Connecting...</h1>
+        
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+        <p id="progress-percentage">0%</p>
+    </div>
+
+    <script>
+        // Django'dan gelen UUID'yi JS değişkenine alıyoruz
+        const roomUUID = "{{ room_uuid }}";
+        
+        const statusText = document.getElementById('status-text');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const progressPercentage = document.getElementById('progress-percentage');
+
+        // WebSocket Protokolünü Belirle (HTTP ise ws://, HTTPS ise wss://)
+        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        const wsUrl = wsProtocol + window.location.host + '/ws/room/' + roomUUID + '/';
+
+        // 1. WebSocket Bağlantısını Başlat
+        const signalingSocket = new WebSocket(wsUrl);
+
+        signalingSocket.onopen = function(e) {
+            console.log("Odaya girildi. Göndericiye hazır olduğumuz bildiriliyor...");
+            statusText.innerText = "Gönderici Bekleniyor...";
+            
+            // Göndericiye bağlantıyı başlatması için sinyal ver
+            signalingSocket.send(JSON.stringify({ 'type': 'ready' }));
+        };
+
+        signalingSocket.onmessage = async function(e) {
+            const message = JSON.parse(e.data);
+
+            // 1. Göndericiden Offer geldiyse bağlantıyı kur ve Answer gönder
+            if (message.offer) {
+                peerConnection = new RTCPeerConnection(rtcConfig);
+
+                // ICE Adaylarını yakala ve göndericiye ilet
+                peerConnection.onicecandidate = event => {
+                    if (event.candidate) {
+                        signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
+                    }
+                };
+
+                // Göndericinin açtığı Data Channel'ı DİNLE
+                peerConnection.ondatachannel = event => {
+                    dataChannel = event.channel;
+                    
+                    dataChannel.onopen = () => {
+                        console.log("Veri kanalı açıldı! Dosya bekleniyor...");
+                        statusText.innerText = "Aktarım Başlıyor...";
+                        progressContainer.style.display = 'block';
+                        progressPercentage.style.display = 'block';
+                    };
+
+                    // Faz 5: Parçalanmış verileri (chunk) toplama alanı
+                    dataChannel.onmessage = event => {
+                        // Dosya parçaları buradan akacak
+                    };
+                };
+
+                // Uzak bağlantıyı ayarla ve Answer üret
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                signalingSocket.send(JSON.stringify({ 'answer': answer }));
+            }
+
+            // 2. Göndericiden gelen ICE adaylarını ekle
+            if (message.candidate) {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+            }
+        };
+
+        signalingSocket.onclose = function(e) {
+            console.error("WebSocket closed unexpectedly");
+            statusText.innerText = "Connection lost.";
+            statusText.style.color = "red";
+        };
+        // WebRTC Yapılandırması (Google STUN Sunucuları)
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        let peerConnection;
+        let dataChannel;
+    </script>
+
+</body>
+</html>
