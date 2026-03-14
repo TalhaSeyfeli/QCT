@@ -79,42 +79,50 @@
     <script>
         // Django'dan gelen UUID'yi JS değişkenine alıyoruz
         const roomUUID = "{{ room_uuid }}";
-        
+
         const statusText = document.getElementById('status-text');
         const progressContainer = document.getElementById('progress-container');
         const progressBar = document.getElementById('progress-bar');
         const progressPercentage = document.getElementById('progress-percentage');
 
-        // WebSocket Protokolünü Belirle (HTTP ise ws://, HTTPS ise wss://)
+        // WebSocket Protokolü
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
         const wsUrl = wsProtocol + window.location.host + '/ws/room/' + roomUUID + '/';
-
-        // 1. WebSocket Bağlantısını Başlat
         const signalingSocket = new WebSocket(wsUrl);
+
+        // WebRTC Yapılandırması
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        let peerConnection;
+        let dataChannel;
+        let receiveBuffer = [];
+        let receivedSize = 0;
+        let fileMetadata = {};
 
         signalingSocket.onopen = function(e) {
             console.log("Odaya girildi. Göndericiye hazır olduğumuz bildiriliyor...");
             statusText.innerText = "Gönderici Bekleniyor...";
-            
-            // Göndericiye bağlantıyı başlatması için sinyal ver
             signalingSocket.send(JSON.stringify({ 'type': 'ready' }));
         };
 
+        // KRİTİK NOKTA: Buradaki 'async' kelimesi hayati önem taşır
         signalingSocket.onmessage = async function(e) {
             const message = JSON.parse(e.data);
 
-            // 1. Göndericiden Offer geldiyse bağlantıyı kur ve Answer gönder
             if (message.offer) {
                 peerConnection = new RTCPeerConnection(rtcConfig);
 
-                // ICE Adaylarını yakala ve göndericiye ilet
                 peerConnection.onicecandidate = event => {
                     if (event.candidate) {
                         signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
                     }
                 };
 
-                // Göndericinin açtığı Data Channel'ı DİNLE
                 peerConnection.ondatachannel = event => {
                     dataChannel = event.channel;
                     
@@ -125,40 +133,86 @@
                         progressPercentage.style.display = 'block';
                     };
 
-                    // Faz 5: Parçalanmış verileri (chunk) toplama alanı
-                    dataChannel.onmessage = event => {
-                        // Dosya parçaları buradan akacak
+                    // KRİTİK NOKTA: Buradaki 'async' kelimesi Web Share API için şarttır
+                    dataChannel.onmessage = async (event) => {
+                        if (typeof event.data === 'string') {
+                            const data = JSON.parse(event.data);
+                            
+                            if (data.type === 'metadata') {
+                                fileMetadata = data;
+                                receiveBuffer = [];
+                                receivedSize = 0;
+                                console.log(`Gelecek dosya: ${fileMetadata.fileName}`);
+                                
+                            } else if (data.type === 'EOF') {
+                                console.log("Tüm parçalar alındı. Dosya birleştiriliyor...");
+                                statusText.innerText = "Dosya İşleniyor...";
+                                
+                                const blob = new Blob(receiveBuffer, { type: fileMetadata.fileType });
+                                const receivedFile = new File([blob], fileMetadata.fileName, { type: fileMetadata.fileType });
+
+                                // Web Share API Tetikleyicisi
+                                if (navigator.canShare && navigator.canShare({ files: [receivedFile] })) {
+                                    try {
+                                        statusText.innerText = "Kaydetmek için seçin ✅";
+                                        // Hatanın kaynağı olan await komutu:
+                                        await navigator.share({
+                                            files: [receivedFile],
+                                            title: fileMetadata.fileName,
+                                            text: 'qct üzerinden alınan dosya'
+                                        });
+                                    } catch (error) {
+                                        triggerClassicDownload(blob, fileMetadata.fileName);
+                                    }
+                                } else {
+                                    triggerClassicDownload(blob, fileMetadata.fileName);
+                                }
+                            }
+                        } 
+                        else {
+                            receiveBuffer.push(event.data);
+                            receivedSize += event.data.byteLength;
+
+                            if (fileMetadata.fileSize) {
+                                const percentage = Math.round((receivedSize / fileMetadata.fileSize) * 100);
+                                progressBar.style.width = percentage + '%';
+                                progressPercentage.innerText = percentage + '%';
+                                
+                                if (percentage === 100) {
+                                    statusText.innerText = "Aktarım Tamamlandı!";
+                                    progressBar.style.backgroundColor = "#007aff";
+                                }
+                            }
+                        }
                     };
                 };
 
-                // Uzak bağlantıyı ayarla ve Answer üret
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
                 signalingSocket.send(JSON.stringify({ 'answer': answer }));
             }
 
-            // 2. Göndericiden gelen ICE adaylarını ekle
             if (message.candidate) {
                 await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
             }
         };
 
-        signalingSocket.onclose = function(e) {
-            console.error("WebSocket closed unexpectedly");
-            statusText.innerText = "Connection lost.";
-            statusText.style.color = "red";
-        };
-        // WebRTC Yapılandırması (Google STUN Sunucuları)
-        const rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        };
-
-        let peerConnection;
-        let dataChannel;
+        // Klasik İndirme (Fallback)
+        function triggerClassicDownload(blob, fileName) {
+            statusText.innerText = "Dosya İndiriliyor... ✅";
+            const downloadUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(downloadUrl);
+            }, 100);
+        }
     </script>
 
 </body>
