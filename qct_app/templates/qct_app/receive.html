@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QCT - Receive File</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#007aff">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2916/2916116.png">
     
     <style>
         * {
@@ -63,10 +66,75 @@
             color: #666;
             display: none;
         }
+
+        /* Kurulum Butonu Tasarımı */
+        .install-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: #333;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 50px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            transition: transform 0.2s ease, opacity 0.3s ease;
+            z-index: 1000;
+        }
+
+        .install-btn:hover {
+            transform: translateY(-2px);
+            background-color: #111;
+        }
+
+        /* iOS Kurulum Bilgilendirme Kutusu Tasarımı */
+        .ios-popup {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 12px;
+            text-align: center;
+            z-index: 1000;
+            width: 90%;
+            max-width: 350px;
+            font-size: 15px;
+            line-height: 1.5;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+        }
+
+        #close-ios-popup {
+            margin-top: 12px;
+            padding: 8px 20px;
+            border: none;
+            background: #007aff; /* iOS Mavisi */
+            color: white;
+            border-radius: 20px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
     </style>
 </head>
 <body>
 
+    <button id="install-btn" class="install-btn" style="display: none;">
+        📱 Uygulamayı Yükle
+    </button>
+
+    <div id="ios-install-popup" class="ios-popup" style="display: none;">
+        🚀 Daha iyi deneyim için:<br>
+        Alttaki <b>Paylaş</b> butonuna dokunun ve <br><b>"Ana Ekrana Ekle"</b>yi seçin.
+        <button id="close-ios-popup">Anladım</button>
+    </div>
+    
     <div class="container">
         <h1 id="status-text">Connecting...</h1>
         
@@ -77,6 +145,15 @@
     </div>
 
     <script>
+        // PWA Service Worker Kaydı
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service-worker.js')
+                    .then(reg => console.log('Service Worker başarıyla kaydedildi.', reg.scope))
+                    .catch(err => console.error('Service Worker kaydı başarısız:', err));
+            });
+        }
+        
         // Django'dan gelen UUID'yi JS değişkenine alıyoruz
         const roomUUID = "{{ room_uuid }}";
 
@@ -167,6 +244,9 @@
                                 } else {
                                     triggerClassicDownload(blob, fileMetadata.fileName);
                                 }
+                                
+                                // Zafer Anı: Dosya teslim edildi, iOS kullanıcısına kurulumu öner
+                                triggerIosPrompt();
                             }
                         } 
                         else {
@@ -212,6 +292,60 @@
                 document.body.removeChild(a);
                 URL.revokeObjectURL(downloadUrl);
             }, 100);
+        }
+
+        // PWA Kurulum Kontrolü (Custom Install Prompt)
+        let deferredPrompt;
+        const installBtn = document.getElementById('install-btn');
+
+        // 1. Tarayıcının varsayılan pop-up'ını engelle ve olayı kaydet
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault(); // Varsayılanı durdur
+            deferredPrompt = e; // Olayı (event) cebimize koy
+            
+            // 2. Kendi şık butonumuzu görünür yap
+            installBtn.style.display = 'block';
+        });
+
+        // 3. Kullanıcı kendi isteğiyle butonumuza tıkladığında
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                // Tarayıcının kurulum menüsünü ŞİMDİ tetikle
+                deferredPrompt.prompt();
+                
+                // Kullanıcının kararını bekle
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    console.log('Kullanıcı uygulamayı kurmayı kabul etti.');
+                } else {
+                    console.log('Kullanıcı kurulumu reddetti.');
+                }
+                
+                // İşlem bitti, butonu ve prompt'u temizle
+                deferredPrompt = null;
+                installBtn.style.display = 'none';
+            }
+        });
+
+        // Zaten kurulmuşsa veya kurulum tamamlandığında butonu gizle
+        window.addEventListener('appinstalled', () => {
+            installBtn.style.display = 'none';
+            console.log('QCT başarıyla ana ekrana kuruldu!');
+        });
+
+        // Akıllı iOS Kurulum Tetikleyicisi (Sadece çağrıldığında çalışır)
+        function triggerIosPrompt() {
+            const isIos = /iphone|ipad|ipod/.test(window.navigator.userAgent.toLowerCase());
+            const isInStandaloneMode = ('standalone' in window.navigator) && (window.navigator.standalone);
+
+            if (isIos && !isInStandaloneMode) {
+                const iosPopup = document.getElementById('ios-install-popup');
+                iosPopup.style.display = 'block';
+                
+                document.getElementById('close-ios-popup').addEventListener('click', () => {
+                    iosPopup.style.display = 'none';
+                }, { once: true }); // Butona basılınca dinleyiciyi temizle
+            }
         }
     </script>
 

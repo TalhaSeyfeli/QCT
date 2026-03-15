@@ -1,0 +1,21 @@
+{
+  "name": "QCT - Hızlı Paylaşım",
+  "short_name": "QCT",
+  "description": "Cihazlar arası kotasız ve hızlı dosya transferi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f4f9",
+  "theme_color": "#007aff",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2916/2916116.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2916/2916116.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
