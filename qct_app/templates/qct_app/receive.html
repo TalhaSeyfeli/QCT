@@ -153,7 +153,71 @@
                     .catch(err => console.error('Service Worker kaydı başarısız:', err));
             });
         }
-        
+
+        // 1. INDEXEDDB (DİSK DEPOLAMA) KURULUMU
+        const dbName = "QCTFileStorage";
+        const storeName = "fileChunks";
+        let db;
+
+        // --- WAKE LOCK API (Ekran Kapanmasını Önleme Motoru) ---
+        let wakeLock = null;
+        let isTransferActive = false; // Aktarımın durumunu takip edeceğiz
+
+        const requestWakeLock = async () => {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
+                    
+                    // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
+                    wakeLock.addEventListener('release', () => {
+                        console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
+                    });
+                } else {
+                    console.warn('Bu tarayıcı Wake Lock API desteklemiyor (Örn: Eski Safari sürümleri).');
+                }
+            } catch (err) {
+                console.error(`Wake Lock Hatası: ${err.name}, ${err.message}`);
+            }
+        };
+
+        const releaseWakeLock = async () => {
+            if (wakeLock !== null) {
+                await wakeLock.release();
+                wakeLock = null;
+                console.log('Aktarım bitti/durdu. Ekran kilidi kaldırıldı.');
+            }
+            isTransferActive = false;
+        };
+
+        // MÜHENDİSLİK DOKUNUŞU: Kullanıcı sekmeyi alta alıp (küçültüp) tekrar açarsa
+        // İşletim sistemi kilidi düşürür. Sekme geri açıldığında aktarım devam ediyorsa kilidi yenile!
+        document.addEventListener('visibilitychange', async () => {
+            if (isTransferActive && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+
+        const initDB = () => {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(dbName, 1);
+                request.onupgradeneeded = (e) => {
+                    db = e.target.result;
+                    if (!db.objectStoreNames.contains(storeName)) {
+                        db.createObjectStore(storeName, { autoIncrement: true });
+                    }
+                };
+                request.onsuccess = (e) => {
+                    db = e.target.result;
+                    resolve();
+                };
+                request.onerror = (e) => reject(e.target.error);
+            });
+        };
+
+        // Sayfa yüklendiğinde Veritabanını hazırla
+        initDB().then(() => console.log("IndexedDB (Disk Depolama) başarıyla hazırlandı."));
+
         // Django'dan gelen UUID'yi JS değişkenine alıyoruz
         const roomUUID = "{{ room_uuid }}";
 
@@ -177,7 +241,7 @@
 
         let peerConnection;
         let dataChannel;
-        let receiveBuffer = [];
+        // receiveBuffer SİLİNDİ, RAM ARTIK RAHAT!
         let receivedSize = 0;
         let fileMetadata = {};
 
@@ -208,49 +272,75 @@
                         statusText.innerText = "Aktarım Başlıyor...";
                         progressContainer.style.display = 'block';
                         progressPercentage.style.display = 'block';
+
+                        // AKTARIM BAŞLADI: Ekran kilidini vur!
+                        isTransferActive = true;
+                        requestWakeLock();
                     };
 
-                    // KRİTİK NOKTA: Buradaki 'async' kelimesi Web Share API için şarttır
+                    // 2. YENİ INDEXEDDB YAZMA VE OKUMA MOTORU
                     dataChannel.onmessage = async (event) => {
+                        // A. Gelen Veri Metin/JSON ise (Metadata veya EOF sinyali)
                         if (typeof event.data === 'string') {
                             const data = JSON.parse(event.data);
                             
                             if (data.type === 'metadata') {
                                 fileMetadata = data;
-                                receiveBuffer = [];
                                 receivedSize = 0;
                                 console.log(`Gelecek dosya: ${fileMetadata.fileName}`);
                                 
-                            } else if (data.type === 'EOF') {
-                                console.log("Tüm parçalar alındı. Dosya birleştiriliyor...");
-                                statusText.innerText = "Dosya İşleniyor...";
+                                // Yeni dosya için diski temizle
+                                const transaction = db.transaction([storeName], "readwrite");
+                                transaction.objectStore(storeName).clear();
                                 
-                                const blob = new Blob(receiveBuffer, { type: fileMetadata.fileType });
-                                const receivedFile = new File([blob], fileMetadata.fileName, { type: fileMetadata.fileType });
+                            } else if (data.type === 'EOF') {
+                                console.log("Tüm parçalar diske yazıldı. Dosya birleştiriliyor...");
+                                statusText.innerText = "Dosya İşleniyor (Lütfen Bekleyin)...";
+                                
+                                // Diskteki parçaları oku
+                                const transaction = db.transaction([storeName], "readonly");
+                                const store = transaction.objectStore(storeName);
+                                const request = store.getAll();
+                                
+                                request.onsuccess = async (e) => {
+                                    const chunks = e.target.result;
+                                    const blob = new Blob(chunks, { type: fileMetadata.fileType });
+                                    const receivedFile = new File([blob], fileMetadata.fileName, { type: fileMetadata.fileType });
 
-                                // Web Share API Tetikleyicisi
-                                if (navigator.canShare && navigator.canShare({ files: [receivedFile] })) {
-                                    try {
-                                        statusText.innerText = "Kaydetmek için seçin ✅";
-                                        // Hatanın kaynağı olan await komutu:
-                                        await navigator.share({
-                                            files: [receivedFile],
-                                            title: fileMetadata.fileName,
-                                            text: 'qct üzerinden alınan dosya'
-                                        });
-                                    } catch (error) {
+                                    // Web Share API Tetikleyicisi
+                                    if (navigator.canShare && navigator.canShare({ files: [receivedFile] })) {
+                                        try {
+                                            statusText.innerText = "Kaydetmek için seçin ✅";
+                                            await navigator.share({
+                                                files: [receivedFile],
+                                                title: fileMetadata.fileName,
+                                                text: 'QCT üzerinden alınan dosya'
+                                            });
+                                        } catch (error) {
+                                            triggerClassicDownload(blob, fileMetadata.fileName);
+                                        }
+                                    } else {
                                         triggerClassicDownload(blob, fileMetadata.fileName);
                                     }
-                                } else {
-                                    triggerClassicDownload(blob, fileMetadata.fileName);
-                                }
-                                
-                                // Zafer Anı: Dosya teslim edildi, iOS kullanıcısına kurulumu öner
-                                triggerIosPrompt();
+                                    
+                                    // Zafer Anı: Dosya teslim edildi, iOS kullanıcısına kurulumu öner
+                                    triggerIosPrompt();
+
+                                    // TEMİZLİK: Diskteki kalıntıları sil
+                                    const clearTx = db.transaction([storeName], "readwrite");
+                                    clearTx.objectStore(storeName).clear();
+                                    chunks.length = 0;
+
+                                    // AKTARIM BİTTİ: Ekran kilidini serbest bırak!
+                                    releaseWakeLock();
+                                };
                             }
                         } 
+                        // B. Gelen Veri ArrayBuffer (Dosya Parçası) ise -> RAM'E DEĞİL DİSKE YAZ
                         else {
-                            receiveBuffer.push(event.data);
+                            const transaction = db.transaction([storeName], "readwrite");
+                            transaction.objectStore(storeName).put(event.data);
+                            
                             receivedSize += event.data.byteLength;
 
                             if (fileMetadata.fileSize) {
@@ -259,7 +349,7 @@
                                 progressPercentage.innerText = percentage + '%';
                                 
                                 if (percentage === 100) {
-                                    statusText.innerText = "Aktarım Tamamlandı!";
+                                    statusText.innerText = "Aktarım Tamamlandı, Birleştiriliyor...";
                                     progressBar.style.backgroundColor = "#007aff";
                                 }
                             }
@@ -298,42 +388,32 @@
         let deferredPrompt;
         const installBtn = document.getElementById('install-btn');
 
-        // 1. Tarayıcının varsayılan pop-up'ını engelle ve olayı kaydet
         window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault(); // Varsayılanı durdur
-            deferredPrompt = e; // Olayı (event) cebimize koy
-            
-            // 2. Kendi şık butonumuzu görünür yap
+            e.preventDefault(); 
+            deferredPrompt = e; 
             installBtn.style.display = 'block';
         });
 
-        // 3. Kullanıcı kendi isteğiyle butonumuza tıkladığında
         installBtn.addEventListener('click', async () => {
             if (deferredPrompt) {
-                // Tarayıcının kurulum menüsünü ŞİMDİ tetikle
                 deferredPrompt.prompt();
-                
-                // Kullanıcının kararını bekle
                 const { outcome } = await deferredPrompt.userChoice;
                 if (outcome === 'accepted') {
                     console.log('Kullanıcı uygulamayı kurmayı kabul etti.');
                 } else {
                     console.log('Kullanıcı kurulumu reddetti.');
                 }
-                
-                // İşlem bitti, butonu ve prompt'u temizle
                 deferredPrompt = null;
                 installBtn.style.display = 'none';
             }
         });
 
-        // Zaten kurulmuşsa veya kurulum tamamlandığında butonu gizle
         window.addEventListener('appinstalled', () => {
             installBtn.style.display = 'none';
             console.log('QCT başarıyla ana ekrana kuruldu!');
         });
 
-        // Akıllı iOS Kurulum Tetikleyicisi (Sadece çağrıldığında çalışır)
+        // Akıllı iOS Kurulum Tetikleyicisi
         function triggerIosPrompt() {
             const isIos = /iphone|ipad|ipod/.test(window.navigator.userAgent.toLowerCase());
             const isInStandaloneMode = ('standalone' in window.navigator) && (window.navigator.standalone);
@@ -344,7 +424,7 @@
                 
                 document.getElementById('close-ios-popup').addEventListener('click', () => {
                     iosPopup.style.display = 'none';
-                }, { once: true }); // Butona basılınca dinleyiciyi temizle
+                }, { once: true });
             }
         }
     </script>

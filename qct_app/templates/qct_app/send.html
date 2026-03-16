@@ -192,6 +192,45 @@
         const qrContainer = document.getElementById('qr-container');
         const statusText = document.getElementById('status-text');
 
+        // --- WAKE LOCK API (Ekran Kapanmasını Önleme Motoru) ---
+        let wakeLock = null;
+        let isTransferActive = false; // Aktarımın durumunu takip edeceğiz
+
+        const requestWakeLock = async () => {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
+                    
+                    // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
+                    wakeLock.addEventListener('release', () => {
+                        console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
+                    });
+                } else {
+                    console.warn('Bu tarayıcı Wake Lock API desteklemiyor (Örn: Eski Safari sürümleri).');
+                }
+            } catch (err) {
+                console.error(`Wake Lock Hatası: ${err.name}, ${err.message}`);
+            }
+        };
+
+        const releaseWakeLock = async () => {
+            if (wakeLock !== null) {
+                await wakeLock.release();
+                wakeLock = null;
+                console.log('Aktarım bitti/durdu. Ekran kilidi kaldırıldı.');
+            }
+            isTransferActive = false;
+        };
+
+        // MÜHENDİSLİK DOKUNUŞU: Kullanıcı sekmeyi alta alıp (küçültüp) tekrar açarsa
+        // İşletim sistemi kilidi düşürür. Sekme geri açıldığında aktarım devam ediyorsa kilidi yenile!
+        document.addEventListener('visibilitychange', async () => {
+            if (isTransferActive && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+
         fileInput.addEventListener('change', function(e) {
             // Kullanıcı bir dosya seçtiyse işlemleri başlat
             if (e.target.files.length > 0) {
@@ -261,8 +300,12 @@
                                 console.error("Gönderilecek dosya bulunamadı!");
                                 return;
                             }
-
-                            // 1. Önce Alıcıya 'Ne gönderdiğimizi' (Metadata) haber verelim
+                            
+                            // AKTARIM BAŞLADI: Ekran kilidini vur!
+                            isTransferActive = true;
+                            requestWakeLock();
+                            
+                            // 1. Önce Alıcıya Metadata gönder
                             const metadata = {
                                 type: 'metadata',
                                 fileName: file.name,
@@ -271,43 +314,66 @@
                             };
                             dataChannel.send(JSON.stringify(metadata));
 
-                            // 2. Parçalama (Chunking) Ayarları
-                            const CHUNK_SIZE = 64 * 1024; // 64 KB'lık güvenli paket boyutu
+                            // 2. Parçalama (Chunking) ve BACKPRESSURE Ayarları
+                            const CHUNK_SIZE = 64 * 1024; // 64 KB'lık mermiler
+                            const MAX_BUFFER_SIZE = 1024 * 1024; // 1 MB: RAM'i koruyan üst sınır
+                            dataChannel.bufferedAmountLowThreshold = 1024 * 512; // 512 KB: Yeniden gaza basma sınırı
+
                             let offset = 0;
                             const reader = new FileReader();
 
+                            // 3. Dosyayı dilimleme (Slice) ve okuma motoru
+                            const readSlice = () => {
+                                // Eğer aktarım bittiyse motoru durdur
+                                if (offset >= file.size) return;
+
+                                // KRİTİK NOKTA: BACKPRESSURE KONTROLÜ
+                                // Eğer WebRTC bekleme odası 1 MB'ı aştıysa, okumayı DURDUR.
+                                if (dataChannel.bufferedAmount > MAX_BUFFER_SIZE) {
+                                    console.log("Ağ yavaşladı, tampon doldu. Okuma bekletiliyor...");
+                                    return; // Çıkış yap, onbufferedamountlow eventini bekle
+                                }
+
+                                const slice = file.slice(offset, offset + CHUNK_SIZE);
+                                reader.readAsArrayBuffer(slice);
+                            };
+
                             // 4. Her bir parça okunduğunda tetiklenen olay
                             reader.onload = function(e) {
-                                // Okunan 64 KB'lık parçayı (ArrayBuffer) kanaldan fırlat
+                                // Okunan parçayı kanaldan fırlat
                                 dataChannel.send(e.target.result);
                                 offset += CHUNK_SIZE;
 
-                                // Dosyanın tamamı bitmediyse, sıradaki parçayı okumaya devam et
+                                // Dosyanın tamamı bitmediyse motoru döndürmeye devam et
                                 if (offset < file.size) {
-                                    // Buffer'ın şişmesini engellemek için küçük bir gecikme ekleyebiliriz ama 
-                                    // yerel ağda 64KB için tarayıcılar genelde bu hızı tolere eder.
                                     readSlice(); 
                                 } else {
-                                    // 5. Dosya tamamen bittiğinde Alıcıya 'EOF' (End of File) sinyali gönder
+                                    // 5. Dosya tamamen bittiğinde 'EOF' sinyali gönder
                                     console.log("Dosya aktarımı tamamlandı. EOF sinyali gönderildi.");
                                     dataChannel.send(JSON.stringify({ type: 'EOF' }));
                                     
                                     // Arayüzü güncelle
                                     statusText.innerText = "Gönderim Başarılı! ✅";
                                     statusText.style.color = "#34c759";
-                                    
-                                    // Zafer Anı: iOS kullanıcısı ise artık kurulumu önerebiliriz
-                                    triggerIosPrompt();
+
+                                    // AKTARIM BİTTİ: Ekran kilidini serbest bırak!
+                                    releaseWakeLock();
+
+                                    // Zafer Anı: İşlem bitti, iOS PWA kurulumunu önerebiliriz
+                                    if (typeof triggerIosPrompt === "function") {
+                                        triggerIosPrompt();
+                                    }
                                 }
                             };
 
-                            // 3. Dosyayı dilimleme (Slice) ve okuma fonksiyonu
-                            const readSlice = () => {
-                                const slice = file.slice(offset, offset + CHUNK_SIZE);
-                                reader.readAsArrayBuffer(slice);
+                            // KRİTİK NOKTA 2: TAMPON BOŞALDI TETİKLEYİCİSİ
+                            // WebRTC biriken veriyi karşıya iletip rahatladığında (512 KB'ın altına düştüğünde) bizi uyarır
+                            dataChannel.onbufferedamountlow = () => {
+                                console.log("Tampon boşaldı. Gönderime kaldığı yerden devam ediliyor...");
+                                readSlice(); // Motoru tekrar çalıştır
                             };
 
-                            // Motoru çalıştır: İlk parçayı oku
+                            // Sistemi başlat: İlk parçayı oku
                             readSlice();
                         };
 
