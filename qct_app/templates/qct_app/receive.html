@@ -258,6 +258,29 @@
             if (message.offer) {
                 peerConnection = new RTCPeerConnection(rtcConfig);
 
+                // --- 1. HATA YÖNETİMİ: BAĞLANTI KOPMASINI YAKALA ---
+                peerConnection.oniceconnectionstatechange = () => {
+                    console.log("WebRTC Bağlantı Durumu:", peerConnection.iceConnectionState);
+                    
+                    if (peerConnection.iceConnectionState === "disconnected" || 
+                        peerConnection.iceConnectionState === "failed" || 
+                        peerConnection.iceConnectionState === "closed") {
+                        
+                        // Kullanıcıya kırmızı bir uyarı ver
+                        const statusEl = document.getElementById('status-text');
+                        if (statusEl) {
+                            statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
+                            statusEl.style.color = "#ff3b30"; // Kırmızı uyarı rengi
+                        }
+
+                        // Transfer yarım kaldıysa ekran kilidini (Wake Lock) zorla kaldır ki şarj gitmesin
+                        if (typeof releaseWakeLock === 'function') releaseWakeLock();
+                        
+                        // (Varsa) Kalp atışını durdur
+                        if (typeof heartbeatInterval !== 'undefined') clearInterval(heartbeatInterval);
+                    }
+                };
+
                 peerConnection.onicecandidate = event => {
                     if (event.candidate) {
                         signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
@@ -273,6 +296,14 @@
                         progressContainer.style.display = 'block';
                         progressPercentage.style.display = 'block';
 
+                        // DataChannel açıldığında Kalp Atışını (Heartbeat) başlat
+                        window.heartbeatInterval = setInterval(() => {
+                            if (dataChannel.readyState === 'open') {
+                                dataChannel.send(JSON.stringify({ type: 'ping' }));
+                                console.log("💓 Heartbeat: Ping gönderildi");
+                            }
+                        }, 10000); // 10 saniyede bir tetiklenir
+
                         // AKTARIM BAŞLADI: Ekran kilidini vur!
                         isTransferActive = true;
                         requestWakeLock();
@@ -284,6 +315,17 @@
                         if (typeof event.data === 'string') {
                             const data = JSON.parse(event.data);
                             
+                            if (data.type === 'ping') {
+                            // Karşıdan ping geldi, hemen pong göndererek 'Yaşıyorum' de
+                            if (dataChannel.readyState === 'open') {
+                                dataChannel.send(JSON.stringify({ type: 'pong' }));
+                            }
+                            return; // Kodun aşağısına inme, burada bitir
+                        } else if (data.type === 'pong') {
+                            console.log("💚 Heartbeat: Pong alındı. Bağlantı sapasağlam.");
+                            return; // Kodun aşağısına inme
+                        }
+
                             if (data.type === 'metadata') {
                                 fileMetadata = data;
                                 receivedSize = 0;

@@ -281,6 +281,29 @@
                         
                         peerConnection = new RTCPeerConnection(rtcConfig);
 
+                        // --- 1. HATA YÖNETİMİ: BAĞLANTI KOPMASINI YAKALA ---
+                        peerConnection.oniceconnectionstatechange = () => {
+                            console.log("WebRTC Bağlantı Durumu:", peerConnection.iceConnectionState);
+                            
+                            if (peerConnection.iceConnectionState === "disconnected" || 
+                                peerConnection.iceConnectionState === "failed" || 
+                                peerConnection.iceConnectionState === "closed") {
+                                
+                                // Kullanıcıya kırmızı bir uyarı ver
+                                const statusEl = document.getElementById('status-text');
+                                if (statusEl) {
+                                    statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
+                                    statusEl.style.color = "#ff3b30"; // Kırmızı uyarı rengi
+                                }
+
+                                // Transfer yarım kaldıysa ekran kilidini (Wake Lock) zorla kaldır ki şarj gitmesin
+                                if (typeof releaseWakeLock === 'function') releaseWakeLock();
+                                
+                                // (Varsa) Kalp atışını durdur
+                                if (typeof heartbeatInterval !== 'undefined') clearInterval(heartbeatInterval);
+                            }
+                        };
+
                         // ICE Adaylarını yakala ve alıcıya gönder
                         peerConnection.onicecandidate = event => {
                             if (event.candidate) {
@@ -291,9 +314,33 @@
                         // Dosya aktarımı için Data Channel'ı YARAT
                         dataChannel = peerConnection.createDataChannel('fileTransfer', { ordered: true });
                         
+                        // --- EKSİK OLAN KALP ATIŞI (HEARTBEAT) DİNLEYİCİSİ ---
+                        dataChannel.onmessage = (event) => {
+                            if (typeof event.data === 'string') {
+                                const data = JSON.parse(event.data);
+                                if (data.type === 'ping') {
+                                    // Alıcı ping attı, hemen pong ile cevap ver
+                                    if (dataChannel.readyState === 'open') {
+                                        dataChannel.send(JSON.stringify({ type: 'pong' }));
+                                    }
+                                } else if (data.type === 'pong') {
+                                    // Alıcıdan pong geldi
+                                    console.log("💚 Heartbeat: Pong alındı. Alıcı hatta ve sapasağlam.");
+                                }
+                            }
+                        };
+
                         dataChannel.onopen = () => {
                             console.log("Veri kanalı açıldı! Dosya gönderimi başlıyor...");
                             statusText.innerText = "Bağlantı Kuruldu. Dosya Gönderiliyor...";
+
+                            // DataChannel açıldığında Kalp Atışını (Heartbeat) başlat
+                            window.heartbeatInterval = setInterval(() => {
+                                if (dataChannel.readyState === 'open') {
+                                    dataChannel.send(JSON.stringify({ type: 'ping' }));
+                                    console.log("💓 Heartbeat: Ping gönderildi");
+                                }
+                            }, 10000); // 10 saniyede bir tetiklenir
                             
                             const file = window.fileToTransfer;
                             if (!file) {
@@ -358,6 +405,9 @@
 
                                     // AKTARIM BİTTİ: Ekran kilidini serbest bırak!
                                     releaseWakeLock();
+
+                                    // YENİ EKLENEN: Aktarım bitti, kalp atışını da durdur ki boşuna çalışmasın
+                                    clearInterval(window.heartbeatInterval);
 
                                     // Zafer Anı: İşlem bitti, iOS PWA kurulumunu önerebiliriz
                                     if (typeof triggerIosPrompt === "function") {
