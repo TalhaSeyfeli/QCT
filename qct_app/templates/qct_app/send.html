@@ -195,17 +195,23 @@
         // --- WAKE LOCK API (Ekran Kapanmasını Önleme Motoru) ---
         let wakeLock = null;
         let isTransferActive = false; // Aktarımın durumunu takip edeceğiz
+        let isTransferSuccess = false; // YENİ: Başarı Bayrağı
 
         const requestWakeLock = async () => {
             try {
                 if ('wakeLock' in navigator) {
-                    wakeLock = await navigator.wakeLock.request('screen');
-                    console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
-                    
-                    // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
-                    wakeLock.addEventListener('release', () => {
-                        console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
-                    });
+                    // Sadece sayfa aktif/görünür ise kilidi iste (Çökmeyi engeller)
+                    if (document.visibilityState === 'visible') {
+                        wakeLock = await navigator.wakeLock.request('screen');
+                        console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
+                        
+                        // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
+                        wakeLock.addEventListener('release', () => {
+                            console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
+                        });
+                    } else {
+                        console.warn('Sayfa arka planda olduğu için Wake Lock şu an alınamadı.');
+                    }
                 } else {
                     console.warn('Bu tarayıcı Wake Lock API desteklemiyor (Örn: Eski Safari sürümleri).');
                 }
@@ -213,6 +219,13 @@
                 console.error(`Wake Lock Hatası: ${err.name}, ${err.message}`);
             }
         };
+
+        // Ekstra Güvenlik: Kullanıcı sekmeye geri döndüğünde kilidi tekrar almaya çalış
+        document.addEventListener('visibilitychange', () => {
+            if (wakeLock === null && document.visibilityState === 'visible') {
+                requestWakeLock();
+            }
+        },  { passive: true });
 
         const releaseWakeLock = async () => {
             if (wakeLock !== null) {
@@ -272,15 +285,81 @@
                     console.log("Sinyalleşme sunucusuna bağlanıldı. Alıcı bekleniyor...");
                 };
 
+                signalingSocket.onclose = function(e) {
+                    console.warn("WebSocket kapandı. Kapanma Kodu (Code):", e.code); 
+                    
+                    // Değişkeni Dışarı Çıktı 4004 de bunu görebilecek.
+                    const statusEl = document.getElementById('status-text');
+                    
+                    if (e.code === 4003) {
+                        console.error("Bağlantı reddedildi: Oda dolu veya meşgul.");
+                        if (statusEl) {
+                            statusEl.innerText = "Bağlantı Meşgul! 🚫 (Bu oda şu an dolu)";
+                            statusEl.style.color = "#ff3b30";
+                        }
+                    } 
+                    else if (e.code === 4004) {
+                        console.error("Bağlantı reddedildi: Link imha edilmiş.");
+                        if (statusEl) {
+                            statusEl.innerText = "Bu Bağlantı Geçersiz!";
+                            statusEl.style.color = "#ff3b30";
+                        }
+                    }
+                    // GÜVENLİK AĞI (Tarayıcı sansürüne karşı)
+                    else {
+                        if (statusEl && (statusEl.innerText.includes("Bekleniyor") || statusEl.innerText.includes("Bağlanıyor"))) {
+                            console.error("Sunucu bağlantıyı kesti (Link ölü veya koptu).");
+                            statusEl.innerText = "Bağlantı Koptu veya Geçersiz ❌";
+                            statusEl.style.color = "#ff3b30";
+                        }
+                    }
+                };
+
                 signalingSocket.onmessage = async (e) => {
                     const message = JSON.parse(e.data);
 
+                    // --- KAMİKAZE KONTROLÜ: Karşı taraf sayfayı yeniledi veya koptu ---
+                    if (message.type === 'room_killed') {
+                        console.error("Karşı taraf ayrıldı. Oda imha ediliyor.");
+                        if (!isTransferSuccess) {
+                            const statusEl = document.getElementById('status-text');
+                            
+                            // Eğer işlem çoktan BAŞARILI olmadıysa kırmızı hatayı bas
+                            if (statusEl && !statusEl.innerText.includes("Başarılı") && !statusEl.innerText.includes("Tamamlandı")) {
+                                statusEl.innerText = "Karşı Taraf Koptu ❌ Lütfen baştan QR oluşturun.";
+                                statusEl.style.color = "#ff3b30";
+                            }
+                        }
+
+                        // HER ŞEYİ TEMİZLE VE BAĞLANTILARI KOPAR
+                        if (peerConnection) peerConnection.close();
+                        if (signalingSocket) signalingSocket.close();
+                        if (typeof releaseWakeLock === 'function') releaseWakeLock();
+                        if (window.heartbeatInterval) clearInterval(window.heartbeatInterval);
+                        window.fileToTransfer = null; // BELLEĞİ SIFIRLA
+                        return;
+                    }
+
                     // 1. Alıcı odaya girdiğinde "ready" mesajı atacak, biz de WebRTC'yi başlatacağız.
                     if (message.type === 'ready') {
+                        if (isTransferFinished) {
+                            console.warn("🔒 Güvenlik: Bu dosya zaten başarıyla gönderildi. Yeni transfer reddedildi.");
+                            return;
+                        }
+
+                        if (peerConnection && (
+                            peerConnection.iceConnectionState === 'connected' || 
+                            peerConnection.iceConnectionState === 'checking' ||
+                            peerConnection.iceConnectionState === 'completed'
+                            )) {
+                                console.warn("🔒 Güvenlik: Zaten aktif bir aktarım var! Dışarıdan gelen 'ready' sinyali reddedildi.");
+                                return; // Kodun aşağısına inme, yeni tünel YARATMA!
+                        }
+                                
                         console.log("Alıcı bağlandı, WebRTC bağlantısı başlatılıyor...");
                         
                         peerConnection = new RTCPeerConnection(rtcConfig);
-
+                        
                         // --- 1. HATA YÖNETİMİ: BAĞLANTI KOPMASINI YAKALA ---
                         peerConnection.oniceconnectionstatechange = () => {
                             console.log("WebRTC Bağlantı Durumu:", peerConnection.iceConnectionState);
@@ -289,18 +368,31 @@
                                 peerConnection.iceConnectionState === "failed" || 
                                 peerConnection.iceConnectionState === "closed") {
                                 
-                                // Kullanıcıya kırmızı bir uyarı ver
-                                const statusEl = document.getElementById('status-text');
-                                if (statusEl) {
-                                    statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
-                                    statusEl.style.color = "#ff3b30"; // Kırmızı uyarı rengi
+                                // Django'ya "Odayı Yok Et" sinyali gönder
+                                if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                                    signalingSocket.send(JSON.stringify({ type: 'kill_room' }));
                                 }
+
+                                // Kullanıcıya kırmızı bir uyarı ver
+                                // Kamikaze Uyarı Bloğu: SADECE BAŞARISIZSA KIRMIZI YAZ
+                                if (!isTransferSuccess) {
+                                    const statusEl = document.getElementById('status-text');
+                                    if (statusEl) {
+                                        statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
+                                        statusEl.style.color = "#ff3b30";
+                                    }
+                                }
+
+                                // KENDİ BELLEĞİNİ VE BAĞLANTILARINI SIFIRLA
+                                if (peerConnection) peerConnection.close();
+                                if (signalingSocket) signalingSocket.close();
 
                                 // Transfer yarım kaldıysa ekran kilidini (Wake Lock) zorla kaldır ki şarj gitmesin
                                 if (typeof releaseWakeLock === 'function') releaseWakeLock();
                                 
                                 // (Varsa) Kalp atışını durdur
-                                if (typeof heartbeatInterval !== 'undefined') clearInterval(heartbeatInterval);
+                                if (window.heartbeatInterval) clearInterval(window.heartbeatInterval);
+                                window.fileToTransfer = null;
                             }
                         };
 
@@ -407,8 +499,37 @@
                                     releaseWakeLock();
 
                                     // YENİ EKLENEN: Aktarım bitti, kalp atışını da durdur ki boşuna çalışmasın
-                                    clearInterval(window.heartbeatInterval);
+                                   if (window.heartbeatInterval) {
+                                       clearInterval(window.heartbeatInterval);
+                                    }
 
+                                    // MÜHRÜ VUR: Bu oda artık yeni gönderim yapamaz
+                                    isTransferFinished = true;
+
+                                    // ZAMAN AYARLI BOMBA YERİNE "AKILLI ŞALTER" (BUFFER KONTROLÜ)
+                                    const closeConnectionSafely = () => {
+                                        // Eğer tarayıcının gönderme kuyruğunda hiç veri kalmadıysa (0 byte ise)
+                                        if (dataChannel.bufferedAmount === 0) {
+                                            isTransferSuccess = true; // BAŞARI BAYRAĞINI DİK!
+
+                                            // YENİ: DJANGO'YA ÖLÜM FERMANINI (KARA LİSTE EMRİNİ) GÖNDER!
+                                            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                                                signalingSocket.send(JSON.stringify({ type: 'transfer_complete' }));
+                                            }
+
+                                            if (peerConnection) peerConnection.close();
+                                            if (signalingSocket) signalingSocket.close();
+                                            console.log("Son byte'a kadar iletildi. Oda güvenli bir şekilde imha edildi.");
+                                        } else {
+                                            // Hala kuyrukta veri varsa, yarım saniye bekle ve tekrar kontrol et
+                                            console.log(`Tampon boşalıyor... Kalan: ${dataChannel.bufferedAmount} byte`);
+                                            setTimeout(closeConnectionSafely, 500); 
+                                        }
+                                    };
+
+                                    // Akıllı şalteri çalıştır
+                                    closeConnectionSafely();
+                                    
                                     // Zafer Anı: İşlem bitti, iOS PWA kurulumunu önerebiliriz
                                     if (typeof triggerIosPrompt === "function") {
                                         triggerIosPrompt();
@@ -435,12 +556,26 @@
 
                     // 2. Alıcıdan gelen Answer'ı kabul et
                     if (message.answer) {
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                        try {
+                            // WebRTC'nin kendi zırhı: Sadece "cevap bekliyorsam" uygula
+                            if (peerConnection.signalingState === "have-local-offer") {
+                                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                            }
+                        } catch (err) {
+                            console.warn("Gecikmeli veya geçersiz Answer yoksayıldı:", err.message);
+                        }
                     }
 
                     // 3. Alıcıdan gelen ICE adaylarını (Ağ koordinatları) ekle
                     if (message.candidate) {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                        try {
+                            // Sadece gerçek bir rota ise ekle
+                            if (peerConnection && peerConnection.signalingState !== "closed") {
+                                await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                            }
+                        } catch (err) {
+                            console.warn("Geçersiz ICE rotası yoksayıldı:", err.message);
+                        }
                     }
                 };
                 
@@ -457,6 +592,7 @@
 
         let peerConnection;
         let dataChannel;
+        let isTransferFinished = false; // Aktarımın bitip bitmediğini tutan mühür
 
         // PWA Kurulum Kontrolü (Custom Install Prompt)
         let deferredPrompt;
@@ -511,6 +647,15 @@
                 }, { once: true }); // Butona basılınca dinleyiciyi temizle
             }
         }
+
+        // KASITLI ÇIKIŞ YAKALAYICI (ZIRHLI VERSİYON)
+        window.addEventListener('beforeunload', () => {
+            // 1. typeof ile değişkenin tanımlanıp tanımlanmadığını kontrol et (Çökmeyi engeller)
+            // 2. Eğer tanımlıysa ve bağlantı açıksa intihar emrini ver
+            if (typeof signalingSocket !== 'undefined' && signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                signalingSocket.send(JSON.stringify({ type: 'kill_room' }));
+            }
+        });
     </script>
 
 </body>
