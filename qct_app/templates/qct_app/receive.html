@@ -162,23 +162,17 @@
         // --- WAKE LOCK API (Ekran Kapanmasını Önleme Motoru) ---
         let wakeLock = null;
         let isTransferActive = false; // Aktarımın durumunu takip edeceğiz
-        let isTransferSuccess = false; // YENİ: Başarı Bayrağı
 
         const requestWakeLock = async () => {
             try {
                 if ('wakeLock' in navigator) {
-                    // Sadece sayfa aktif/görünür ise kilidi iste (Çökmeyi engeller)
-                    if (document.visibilityState === 'visible') {
-                        wakeLock = await navigator.wakeLock.request('screen');
-                        console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
-                        
-                        // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
-                        wakeLock.addEventListener('release', () => {
-                            console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
-                        });
-                    } else {
-                        console.warn('Sayfa arka planda olduğu için Wake Lock şu an alınamadı.');
-                    }
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Ekran kilidi (Wake Lock) aktif edildi. Ekran kapanmayacak.');
+                    
+                    // İşletim sistemi pili korumak için kilidi zorla açarsa bunu yakala
+                    wakeLock.addEventListener('release', () => {
+                        console.log('Ekran kilidi (Wake Lock) sistem tarafından serbest bırakıldı.');
+                    });
                 } else {
                     console.warn('Bu tarayıcı Wake Lock API desteklemiyor (Örn: Eski Safari sürümleri).');
                 }
@@ -186,13 +180,6 @@
                 console.error(`Wake Lock Hatası: ${err.name}, ${err.message}`);
             }
         };
-
-        // Ekstra Güvenlik: Kullanıcı sekmeye geri döndüğünde kilidi tekrar almaya çalış
-        document.addEventListener('visibilitychange', () => {
-            if (wakeLock === null && document.visibilityState === 'visible') {
-                requestWakeLock();
-            }
-        },  { passive: true });
 
         const releaseWakeLock = async () => {
             if (wakeLock !== null) {
@@ -264,254 +251,162 @@
             signalingSocket.send(JSON.stringify({ 'type': 'ready' }));
         };
 
-        // YENİ: Sunucudan atılırsak (Oda doluysa) bunu yakala ve arayüze yaz
-        signalingSocket.onclose = function(e) {
-            console.warn("WebSocket kapandı. Kapanma Kodu (Code):", e.code); 
-            
-            // DÜZELTME: Değişkeni Dışarı Çıkardık! Artık 4004 de bunu görebilecek.
-            const statusEl = document.getElementById('status-text');
-            
-            if (e.code === 4003) {
-                console.error("Bağlantı reddedildi: Oda dolu veya meşgul.");
-                if (statusEl) {
-                    statusEl.innerText = "Bağlantı Meşgul! 🚫 (Bu oda şu an dolu)";
-                    statusEl.style.color = "#ff3b30";
-                }
-            } 
-            else if (e.code === 4004) {
-                console.error("Bağlantı reddedildi: Link imha edilmiş.");
-                if (statusEl) {
-                    statusEl.innerText = "Bu Bağlantı Geçersiz!";
-                    statusEl.style.color = "#ff3b30";
-                }
-            }
-            // GÜVENLİK AĞI (Tarayıcı sansürüne karşı)
-            else {
-                if (statusEl && (statusEl.innerText.includes("Bekleniyor") || statusEl.innerText.includes("Bağlanıyor"))) {
-                    console.error("Sunucu bağlantıyı kesti (Link ölü veya koptu).");
-                    statusEl.innerText = "Bağlantı Koptu veya Geçersiz ❌";
-                    statusEl.style.color = "#ff3b30";
-                }
-            }
-        };
-
         // KRİTİK NOKTA: Buradaki 'async' kelimesi hayati önem taşır
         signalingSocket.onmessage = async function(e) {
             const message = JSON.parse(e.data);
 
-            // --- KAMİKAZE KONTROLÜ: Karşı taraf sayfayı yeniledi veya koptu ---
-            if (message.type === 'room_killed') {
-                console.error("Karşı taraf ayrıldı. Oda imha ediliyor.");
-                if (!isTransferSuccess) {
-                    const statusEl = document.getElementById('status-text');
-                    
-                    // Eğer işlem çoktan BAŞARILI olmadıysa kırmızı hatayı bas
-                    if (statusEl && !statusEl.innerText.includes("Başarılı") && !statusEl.innerText.includes("Tamamlandı")) {
-                        statusEl.innerText = "Karşı Taraf Koptu ❌ Lütfen baştan QR oluşturun.";
-                        statusEl.style.color = "#ff3b30";
-                    }
-                }
-
-                // HER ŞEYİ TEMİZLE VE BAĞLANTILARI KOPAR
-                if (peerConnection) peerConnection.close();
-                if (signalingSocket) signalingSocket.close();
-                if (typeof releaseWakeLock === 'function') releaseWakeLock();
-                if (window.heartbeatInterval) clearInterval(window.heartbeatInterval);
-                window.fileToTransfer = null; // BELLEĞİ SIFIRLA
-                return;
-            }
-
             if (message.offer) {
-                try {
-                    if (!peerConnection) {
-                        console.log("Göndericiden teklif alındı. WebRTC bağlantısı kuruluyor...");
-                        
-                        peerConnection = new RTCPeerConnection(rtcConfig);
+                peerConnection = new RTCPeerConnection(rtcConfig);
 
-                        // --- 1. HATA YÖNETİMİ: BAĞLANTI KOPMASINI YAKALA ---
-                        peerConnection.oniceconnectionstatechange = () => {
-                            console.log("WebRTC Bağlantı Durumu:", peerConnection.iceConnectionState);
-                            
-                            if (peerConnection.iceConnectionState === "disconnected" || 
-                                peerConnection.iceConnectionState === "failed" || 
-                                peerConnection.iceConnectionState === "closed") {
-                                
-                                // Django'ya "Odayı Yok Et" sinyali gönder
-                                if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                                    signalingSocket.send(JSON.stringify({ type: 'kill_room' }));
-                                }
-
-                                
-                                // Kamikaze Uyarı Bloğu: SADECE BAŞARISIZSA KIRMIZI YAZ
-                                if (!isTransferSuccess) {
-                                    // Kullanıcıya kırmızı bir uyarı ver
-                                    const statusEl = document.getElementById('status-text');
-                                    if (statusEl) {
-                                        statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
-                                        statusEl.style.color = "#ff3b30"; // Kırmızı uyarı rengi
-                                    }
-                                }
-
-                                // KENDİ BELLEĞİNİ VE BAĞLANTILARINI SIFIRLA
-                                if (peerConnection) peerConnection.close();
-                                if (signalingSocket) signalingSocket.close();
-
-                                // Transfer yarım kaldıysa ekran kilidini (Wake Lock) zorla kaldır ki şarj gitmesin
-                                if (typeof releaseWakeLock === 'function') releaseWakeLock();
-                                
-                                // (Varsa) Kalp atışını durdur
-                                if (window.heartbeatInterval) clearInterval(window.heartbeatInterval);
-                                window.fileToTransfer = null;
-                            }
-                        };
-
-                        peerConnection.onicecandidate = event => {
-                            if (event.candidate) {
-                                signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
-                            }
-                        };
-
-                        peerConnection.ondatachannel = event => {
-                            dataChannel = event.channel;
-                            
-                            dataChannel.onopen = () => {
-                                console.log("Veri kanalı açıldı! Dosya bekleniyor...");
-                                statusText.innerText = "Aktarım Başlıyor...";
-                                progressContainer.style.display = 'block';
-                                progressPercentage.style.display = 'block';
-
-                                // DataChannel açıldığında Kalp Atışını (Heartbeat) başlat
-                                window.heartbeatInterval = setInterval(() => {
-                                    if (dataChannel.readyState === 'open') {
-                                        dataChannel.send(JSON.stringify({ type: 'ping' }));
-                                        console.log("💓 Heartbeat: Ping gönderildi");
-                                    }
-                                }, 10000); // 10 saniyede bir tetiklenir
-
-                                // AKTARIM BAŞLADI: Ekran kilidini vur!
-                                isTransferActive = true;
-                                requestWakeLock();
-                            };
-
-                            // 2. YENİ INDEXEDDB YAZMA VE OKUMA MOTORU
-                            dataChannel.onmessage = async (event) => {
-                                // A. Gelen Veri Metin/JSON ise (Metadata veya EOF sinyali)
-                                if (typeof event.data === 'string') {
-                                    const data = JSON.parse(event.data);
-                                    
-                                    if (data.type === 'ping') {
-                                    // Karşıdan ping geldi, hemen pong göndererek 'Yaşıyorum' de
-                                    if (dataChannel.readyState === 'open') {
-                                        dataChannel.send(JSON.stringify({ type: 'pong' }));
-                                    }
-                                    return; // Kodun aşağısına inme, burada bitir
-                                } else if (data.type === 'pong') {
-                                    console.log("💚 Heartbeat: Pong alındı. Bağlantı sapasağlam.");
-                                    return; // Kodun aşağısına inme
-                                }
-
-                                    if (data.type === 'metadata') {
-                                        fileMetadata = data;
-                                        receivedSize = 0;
-                                        console.log(`Gelecek dosya: ${fileMetadata.fileName}`);
-                                        
-                                        // Yeni dosya için diski temizle
-                                        const transaction = db.transaction([storeName], "readwrite");
-                                        transaction.objectStore(storeName).clear();
-                                        
-                                    } else if (data.type === 'EOF') {
-                                        isTransferSuccess = true; // BAŞARI BAYRAĞINI DİK! Artık Kamikaze ekranı kırmızı yapamaz.
-                                        console.log("Tüm parçalar diske yazıldı. Dosya birleştiriliyor...");
-                                        statusText.innerText = "Dosya İşleniyor (Lütfen Bekleyin)...";
-                                        
-                                        // Diskteki parçaları oku
-                                        const transaction = db.transaction([storeName], "readonly");
-                                        const store = transaction.objectStore(storeName);
-                                        const request = store.getAll();
-                                        
-                                        request.onsuccess = async (e) => {
-                                            const chunks = e.target.result;
-                                            const blob = new Blob(chunks, { type: fileMetadata.fileType });
-                                            const receivedFile = new File([blob], fileMetadata.fileName, { type: fileMetadata.fileType });
-
-                                            // Web Share API Tetikleyicisi
-                                            if (navigator.canShare && navigator.canShare({ files: [receivedFile] })) {
-                                                try {
-                                                    statusText.innerText = "Kaydetmek için seçin ✅";
-                                                    await navigator.share({
-                                                        files: [receivedFile],
-                                                        title: fileMetadata.fileName,
-                                                        text: 'QCT üzerinden alınan dosya'
-                                                    });
-                                                    console.log("Yerel paylaşım menüsü başarıyla açıldı.");
-                                                    statusText.innerText = "İşlem Tamamlandı! ✅"; // YENİ EKLENEN FİNAL YAZISI
-                                                    statusText.style.color = "#34c759";
-                                                } catch (error) {
-                                                    triggerClassicDownload(blob, fileMetadata.fileName);
-                                                }
-                                            } else {
-                                                triggerClassicDownload(blob, fileMetadata.fileName);
-                                            }
-                                            
-                                            // Zafer Anı: Dosya teslim edildi, iOS kullanıcısına kurulumu öner
-                                            triggerIosPrompt();
-
-                                            // TEMİZLİK: Diskteki kalıntıları sil
-                                            const clearTx = db.transaction([storeName], "readwrite");
-                                            clearTx.objectStore(storeName).clear();
-                                            chunks.length = 0;
-
-                                            // AKTARIM BİTTİ: Ekran kilidini serbest bırak!
-                                            releaseWakeLock();
-                                        };
-                                    }
-                                } 
-                                // B. Gelen Veri ArrayBuffer (Dosya Parçası) ise -> RAM'E DEĞİL DİSKE YAZ
-                                else {
-                                    const transaction = db.transaction([storeName], "readwrite");
-                                    transaction.objectStore(storeName).put(event.data);
-                                    
-                                    receivedSize += event.data.byteLength;
-
-                                    if (fileMetadata.fileSize) {
-                                        const percentage = Math.round((receivedSize / fileMetadata.fileSize) * 100);
-                                        progressBar.style.width = percentage + '%';
-                                        progressPercentage.innerText = percentage + '%';
-                                        
-                                        if (percentage === 100) {
-                                            statusText.innerText = "Aktarım Tamamlandı, Birleştiriliyor...";
-                                            progressBar.style.backgroundColor = "#007aff";
-                                        }
-                                    }
-                                }
-                            };
-                        };
-                    }
-
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+                // --- 1. HATA YÖNETİMİ: BAĞLANTI KOPMASINI YAKALA ---
+                peerConnection.oniceconnectionstatechange = () => {
+                    console.log("WebRTC Bağlantı Durumu:", peerConnection.iceConnectionState);
                     
-                    if (peerConnection.signalingState === "have-remote-offer") {
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
+                    if (peerConnection.iceConnectionState === "disconnected" || 
+                        peerConnection.iceConnectionState === "failed" || 
+                        peerConnection.iceConnectionState === "closed") {
                         
-                        if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                            signalingSocket.send(JSON.stringify({ type: 'answer', answer: peerConnection.localDescription }));
+                        // Kullanıcıya kırmızı bir uyarı ver
+                        const statusEl = document.getElementById('status-text');
+                        if (statusEl) {
+                            statusEl.innerText = "Bağlantı Koptu! ❌ Lütfen sayfayı yenileyin.";
+                            statusEl.style.color = "#ff3b30"; // Kırmızı uyarı rengi
                         }
+
+                        // Transfer yarım kaldıysa ekran kilidini (Wake Lock) zorla kaldır ki şarj gitmesin
+                        if (typeof releaseWakeLock === 'function') releaseWakeLock();
+                        
+                        // (Varsa) Kalp atışını durdur
+                        if (typeof heartbeatInterval !== 'undefined') clearInterval(heartbeatInterval);
                     }
-                } catch (err) {
-                    console.error("Teklif (Offer) işlenirken hata:", err);
-                }
+                };
+
+                peerConnection.onicecandidate = event => {
+                    if (event.candidate) {
+                        signalingSocket.send(JSON.stringify({ 'candidate': event.candidate }));
+                    }
+                };
+
+                peerConnection.ondatachannel = event => {
+                    dataChannel = event.channel;
+                    
+                    dataChannel.onopen = () => {
+                        console.log("Veri kanalı açıldı! Dosya bekleniyor...");
+                        statusText.innerText = "Aktarım Başlıyor...";
+                        progressContainer.style.display = 'block';
+                        progressPercentage.style.display = 'block';
+
+                        // DataChannel açıldığında Kalp Atışını (Heartbeat) başlat
+                        window.heartbeatInterval = setInterval(() => {
+                            if (dataChannel.readyState === 'open') {
+                                dataChannel.send(JSON.stringify({ type: 'ping' }));
+                                console.log("💓 Heartbeat: Ping gönderildi");
+                            }
+                        }, 10000); // 10 saniyede bir tetiklenir
+
+                        // AKTARIM BAŞLADI: Ekran kilidini vur!
+                        isTransferActive = true;
+                        requestWakeLock();
+                    };
+
+                    // 2. YENİ INDEXEDDB YAZMA VE OKUMA MOTORU
+                    dataChannel.onmessage = async (event) => {
+                        // A. Gelen Veri Metin/JSON ise (Metadata veya EOF sinyali)
+                        if (typeof event.data === 'string') {
+                            const data = JSON.parse(event.data);
+                            
+                            if (data.type === 'ping') {
+                            // Karşıdan ping geldi, hemen pong göndererek 'Yaşıyorum' de
+                            if (dataChannel.readyState === 'open') {
+                                dataChannel.send(JSON.stringify({ type: 'pong' }));
+                            }
+                            return; // Kodun aşağısına inme, burada bitir
+                        } else if (data.type === 'pong') {
+                            console.log("💚 Heartbeat: Pong alındı. Bağlantı sapasağlam.");
+                            return; // Kodun aşağısına inme
+                        }
+
+                            if (data.type === 'metadata') {
+                                fileMetadata = data;
+                                receivedSize = 0;
+                                console.log(`Gelecek dosya: ${fileMetadata.fileName}`);
+                                
+                                // Yeni dosya için diski temizle
+                                const transaction = db.transaction([storeName], "readwrite");
+                                transaction.objectStore(storeName).clear();
+                                
+                            } else if (data.type === 'EOF') {
+                                console.log("Tüm parçalar diske yazıldı. Dosya birleştiriliyor...");
+                                statusText.innerText = "Dosya İşleniyor (Lütfen Bekleyin)...";
+                                
+                                // Diskteki parçaları oku
+                                const transaction = db.transaction([storeName], "readonly");
+                                const store = transaction.objectStore(storeName);
+                                const request = store.getAll();
+                                
+                                request.onsuccess = async (e) => {
+                                    const chunks = e.target.result;
+                                    const blob = new Blob(chunks, { type: fileMetadata.fileType });
+                                    const receivedFile = new File([blob], fileMetadata.fileName, { type: fileMetadata.fileType });
+
+                                    // Web Share API Tetikleyicisi
+                                    if (navigator.canShare && navigator.canShare({ files: [receivedFile] })) {
+                                        try {
+                                            statusText.innerText = "Kaydetmek için seçin ✅";
+                                            await navigator.share({
+                                                files: [receivedFile],
+                                                title: fileMetadata.fileName,
+                                                text: 'QCT üzerinden alınan dosya'
+                                            });
+                                        } catch (error) {
+                                            triggerClassicDownload(blob, fileMetadata.fileName);
+                                        }
+                                    } else {
+                                        triggerClassicDownload(blob, fileMetadata.fileName);
+                                    }
+                                    
+                                    // Zafer Anı: Dosya teslim edildi, iOS kullanıcısına kurulumu öner
+                                    triggerIosPrompt();
+
+                                    // TEMİZLİK: Diskteki kalıntıları sil
+                                    const clearTx = db.transaction([storeName], "readwrite");
+                                    clearTx.objectStore(storeName).clear();
+                                    chunks.length = 0;
+
+                                    // AKTARIM BİTTİ: Ekran kilidini serbest bırak!
+                                    releaseWakeLock();
+                                };
+                            }
+                        } 
+                        // B. Gelen Veri ArrayBuffer (Dosya Parçası) ise -> RAM'E DEĞİL DİSKE YAZ
+                        else {
+                            const transaction = db.transaction([storeName], "readwrite");
+                            transaction.objectStore(storeName).put(event.data);
+                            
+                            receivedSize += event.data.byteLength;
+
+                            if (fileMetadata.fileSize) {
+                                const percentage = Math.round((receivedSize / fileMetadata.fileSize) * 100);
+                                progressBar.style.width = percentage + '%';
+                                progressPercentage.innerText = percentage + '%';
+                                
+                                if (percentage === 100) {
+                                    statusText.innerText = "Aktarım Tamamlandı, Birleştiriliyor...";
+                                    progressBar.style.backgroundColor = "#007aff";
+                                }
+                            }
+                        }
+                    };
+                };
+
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                signalingSocket.send(JSON.stringify({ 'answer': answer }));
             }
 
             if (message.candidate) {
-                try {
-                    // Sadece gerçek bir rota ise ekle
-                    if (peerConnection && peerConnection.signalingState !== "closed") {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                    }
-                } catch (err) {
-                    console.warn("Geçersiz ICE rotası yoksayıldı:", err.message);
-                }
+                await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
             }
         };
 
@@ -525,12 +420,9 @@
             document.body.appendChild(a);
             a.click();
             
-            // RAM'i temizle ve Ekrana Final Yazısını Bas
             setTimeout(() => {
                 document.body.removeChild(a);
                 URL.revokeObjectURL(downloadUrl);
-                statusText.innerText = "İşlem Tamamlandı! ✅"; // YENİ EKLENEN FİNAL YAZISI
-                statusText.style.color = "#34c759";
             }, 100);
         }
 
@@ -577,15 +469,6 @@
                 }, { once: true });
             }
         }
-
-        // KASITLI ÇIKIŞ YAKALAYICI (ZIRHLI VERSİYON)
-        window.addEventListener('beforeunload', () => {
-            // 1. typeof ile değişkenin tanımlanıp tanımlanmadığını kontrol et (Çökmeyi engeller)
-            // 2. Eğer tanımlıysa ve bağlantı açıksa intihar emrini ver
-            if (typeof signalingSocket !== 'undefined' && signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                signalingSocket.send(JSON.stringify({ type: 'kill_room' }));
-            }
-        });
     </script>
 
 </body>
