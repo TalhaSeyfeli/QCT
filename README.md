@@ -49,7 +49,7 @@ QCT acts entirely as a **signaling server** and not a file server. Here is the l
 | Main View | Sender View | Receiver View |
 | :---: | :---: | :---: |
 | <img src="images/main.png" width="300"> | <img src="images/sender.png" width="300">| <img src="images/receiver.png" width="300"> |
-| *The sender generates a unique QR code and waits for the receiver to scan and join the room.* | *Sender selects a file and shares the QR code.* | *Receiver scans the QR code and accepts the transfer.* |
+|*Sender selects a file.* | *The sender generates a unique QR code and waits for the receiver to scan and join the room.* |  *Receiver scans the QR code and accepts the transfer.* |
 
 ---
 
