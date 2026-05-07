@@ -143,7 +143,3 @@ Simply share the generated `https://` ngrok URL with the receiver!
 - [ ] UI/UX polish (Animations, glassmorphism)
 
 ---
-
-<div align="center">
-  <i>Developed with ❤️ by <a href="https://github.com/TalhaSeyfeli">Talha Seyfeli</a></i>
-</div>
